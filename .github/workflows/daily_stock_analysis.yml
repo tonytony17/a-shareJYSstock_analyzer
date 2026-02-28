@@ -41,6 +41,7 @@ jobs:
           cat > .env << EOF
           EMAIL_ADDRESS=${{ secrets.EMAIL_ADDRESS }}
           EMAIL_PASSWORD=${{ secrets.EMAIL_PASSWORD }}
+          RECIPIENT_EMAIL=${{ secrets.RECIPIENT_EMAIL }}
           EOF
 
       # ── 手动触发：测试邮件模式 ──────────────────────────────
