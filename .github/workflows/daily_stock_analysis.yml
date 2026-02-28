@@ -1,0 +1,74 @@
+name: 每日自动选股分析
+
+on:
+  schedule:
+    # UTC 08:10 = 北京时间 16:10（股市收盘后）
+    # 周一到周五自动运行
+    - cron: '10 8 * * 1-5'
+  
+  # 允许手动触发（方便测试）
+  workflow_dispatch:
+    inputs:
+      send_email:
+        description: '是否发送邮件'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: |
+          pip install -r requirements.txt
+
+      - name: 创建 .env 配置文件
+        run: |
+          cat > .env << EOF
+          EMAIL_ADDRESS=${{ secrets.EMAIL_ADDRESS }}
+          EMAIL_PASSWORD=${{ secrets.EMAIL_PASSWORD }}
+          RECIPIENT_EMAIL=${{ secrets.RECIPIENT_EMAIL }}
+          EOF
+
+      - name: 运行选股分析
+        id: run_analysis
+        run: |
+          python main.py --mode analysis
+        continue-on-error: true
+
+      - name: 上传分析报告（备份）
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stock-report-${{ github.run_id }}
+          path: |
+            logs/
+            *.md
+            *.html
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: 任务完成通知
+        if: always()
+        run: |
+          if [ "${{ steps.run_analysis.outcome }}" == "success" ]; then
+            echo "✅ 选股分析完成，报告已发送至邮箱"
+          else
+            echo "❌ 选股分析失败，请检查日志"
+            exit 1
+          fi
