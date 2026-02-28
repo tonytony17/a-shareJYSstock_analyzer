@@ -9,14 +9,14 @@ on:
   # 允许手动触发（方便测试）
   workflow_dispatch:
     inputs:
-      send_email:
-        description: '是否发送邮件'
+      mode:
+        description: '运行模式'
         required: false
-        default: 'true'
+        default: 'test_email'
         type: choice
         options:
-          - 'true'
-          - 'false'
+          - test_email     # 只测试邮件（推荐第一次用）
+          - full_analysis  # 完整分析 + 发邮件
 
 jobs:
   analyze:
@@ -34,8 +34,7 @@ jobs:
           cache: 'pip'
 
       - name: 安装依赖
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: 创建 .env 配置文件
         run: |
@@ -45,30 +44,32 @@ jobs:
           RECIPIENT_EMAIL=${{ secrets.RECIPIENT_EMAIL }}
           EOF
 
-      - name: 运行选股分析
-        id: run_analysis
+      # ── 手动触发：测试邮件模式 ──────────────────────────────
+      - name: 📧 测试邮件发送
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'test_email' }}
         run: |
-          python main.py --mode analysis
-        continue-on-error: true
+          echo "=== 测试邮件通路 ==="
+          python main.py --mode test
 
-      - name: 上传分析报告（备份）
+      # ── 手动触发：完整分析模式 / 定时自动运行 ──────────────
+      - name: 📊 运行选股分析
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full_analysis') }}
+        run: |
+          echo "=== 开始选股分析 ==="
+          python main.py --mode analysis
+
+      - name: 📬 发送分析报告邮件
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full_analysis') }}
+        run: |
+          echo "=== 发送邮件报告 ==="
+          python main.py --mode email
+
+      # ── 上传报告备份（所有模式都执行）─────────────────────
+      - name: 💾 备份报告到 Artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: stock-report-${{ github.run_id }}
-          path: |
-            logs/
-            *.md
-            *.html
+          path: logs/
           retention-days: 30
           if-no-files-found: ignore
-
-      - name: 任务完成通知
-        if: always()
-        run: |
-          if [ "${{ steps.run_analysis.outcome }}" == "success" ]; then
-            echo "✅ 选股分析完成，报告已发送至邮箱"
-          else
-            echo "❌ 选股分析失败，请检查日志"
-            exit 1
-          fi
