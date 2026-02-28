@@ -1,0 +1,82 @@
+name: 手动回测分析
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '回测模式'
+        required: true
+        default: 'single'
+        type: choice
+        options:
+          - single   # 单日回测
+          - multi    # 多日回测
+      date:
+        description: '单日回测日期（single模式用，格式: 2025-09-25，留空=自动取上一工作日）'
+        required: false
+        default: ''
+      start_date:
+        description: '多日回测开始日期（multi模式用，格式: 2025-09-23）'
+        required: false
+        default: ''
+      end_date:
+        description: '多日回测结束日期（multi模式用，格式: 2025-09-27）'
+        required: false
+        default: ''
+      hold_days:
+        description: '持有天数'
+        required: false
+        default: '1'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 创建 .env 配置文件
+        run: |
+          cat > .env << EOF
+          EMAIL_ADDRESS=${{ secrets.EMAIL_ADDRESS }}
+          EMAIL_PASSWORD=${{ secrets.EMAIL_PASSWORD }}
+          RECIPIENT_EMAIL=${{ secrets.RECIPIENT_EMAIL }}
+          EOF
+
+      - name: 运行单日回测
+        if: ${{ inputs.mode == 'single' }}
+        run: |
+          if [ -z "${{ inputs.date }}" ]; then
+            python run_backtest_optimized.py --mode single --hold ${{ inputs.hold_days }}
+          else
+            python run_backtest_optimized.py --mode single --date ${{ inputs.date }} --hold ${{ inputs.hold_days }}
+          fi
+
+      - name: 运行多日回测
+        if: ${{ inputs.mode == 'multi' }}
+        run: |
+          python run_backtest_optimized.py \
+            --mode multi \
+            --start ${{ inputs.start_date }} \
+            --end ${{ inputs.end_date }} \
+            --hold ${{ inputs.hold_days }}
+
+      - name: 📥 下载回测报告
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backtest-report-${{ github.run_id }}
+          path: logs/backtest/
+          retention-days: 90
+          if-no-files-found: ignore
