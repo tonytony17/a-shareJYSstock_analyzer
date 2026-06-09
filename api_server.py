@@ -36,6 +36,59 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ── 优化1：五档评级（原三档粒度不足，A 70-84 分差距15分被同等对待）──
+def five_tier_grade(score: float) -> dict:
+    """
+    将综合评分映射为五档评级。
+    S≥82 为高置信度买入信号；C<60 建议回避。
+    返回 {'grade': 'S', 'label': '强烈推荐', 'confidence': 'high'}
+    """
+    if score >= 82:
+        return {'grade': 'S',  'label': '强烈推荐', 'confidence': 'high'}
+    elif score >= 75:
+        return {'grade': 'A',  'label': '推荐',     'confidence': 'high'}
+    elif score >= 68:
+        return {'grade': 'B+', 'label': '关注',     'confidence': 'medium'}
+    elif score >= 60:
+        return {'grade': 'B',  'label': '观望',     'confidence': 'low'}
+    else:
+        return {'grade': 'C',  'label': '回避',     'confidence': 'low'}
+
+
+# ── 优化2：动量门控（负动量时对技术面高分进行惩罚，防止趋势向下的股票霸榜）──
+MOMENTUM_PENALTY = 0.6   # 20日动量为负时，技术面分乘以此系数
+MOMENTUM_WARN_THRESHOLD = -0.05  # 动量低于 -5% 时在返回数据中标注警告
+
+def apply_momentum_gate(stock: dict) -> dict:
+    """
+    就地修改 stock 字典：
+    - 若 momentum_20d < 0，对 scoreBreakdown.technical 施加惩罚系数，重算 strengthScore
+    - 若动量低于警告阈值，附加 momentumWarning 字段
+    返回修改后的 stock（同一对象）
+    """
+    momentum = stock.get('momentum20d', 0)
+    breakdown = stock.get('scoreBreakdown', {})
+    tech_score = breakdown.get('technical', 0)
+
+    if momentum < 0:
+        penalized_tech = round(tech_score * MOMENTUM_PENALTY)
+        score_delta = tech_score - penalized_tech
+        breakdown['technical'] = penalized_tech
+        breakdown['technicalPenaltyApplied'] = True
+        stock['scoreBreakdown'] = breakdown
+        stock['strengthScore'] = round(max(0, stock.get('strengthScore', 0) - score_delta), 1)
+        # 重新计算五档评级
+        new_grade_info = five_tier_grade(stock['strengthScore'])
+        stock['grade'] = new_grade_info['grade']
+        stock['gradeLabel'] = new_grade_info['label']
+        stock['gradeConfidence'] = new_grade_info['confidence']
+
+    if momentum < MOMENTUM_WARN_THRESHOLD:
+        stock['momentumWarning'] = f"20日动量 {momentum*100:+.1f}%，趋势偏弱，建议谨慎"
+
+    return stock
+
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """健康检查接口"""
@@ -73,8 +126,12 @@ def get_recommended_stocks():
         for stock in selected_stocks:
             score_detail = stock.get('strength_score_detail', {})
             breakdown = score_detail.get('breakdown', {})
+            raw_score = stock.get('strength_score', 0)
 
-            stocks_data.append({
+            # 五档评级
+            grade_info = five_tier_grade(raw_score)
+
+            entry = {
                 'rank': stock.get('rank', 0),
                 'code': stock.get('code', ''),
                 'name': stock.get('name', ''),
@@ -83,9 +140,11 @@ def get_recommended_stocks():
                 'peRatio': round(stock.get('pe_ratio', 0), 2),
                 'pbRatio': round(stock.get('pb_ratio', 0), 2),
                 'roe': round(stock.get('roe', 0), 2),
-                'momentum20d': round(stock.get('momentum_20d', 0), 2),
-                'strengthScore': round(stock.get('strength_score', 0), 1),
-                'grade': score_detail.get('grade', ''),
+                'momentum20d': round(stock.get('momentum_20d', 0), 4),
+                'strengthScore': round(raw_score, 1),
+                'grade': grade_info['grade'],
+                'gradeLabel': grade_info['label'],
+                'gradeConfidence': grade_info['confidence'],
                 'scoreBreakdown': {
                     'technical': breakdown.get('technical', 0),
                     'valuation': breakdown.get('valuation', 0),
@@ -95,7 +154,11 @@ def get_recommended_stocks():
                 },
                 'selectionReason': stock.get('selection_reason', ''),
                 'industry': stock.get('industry', '未知')
-            })
+            }
+
+            # 动量门控：负动量时惩罚技术面分并追加警告
+            entry = apply_momentum_gate(entry)
+            stocks_data.append(entry)
 
         return jsonify({
             'code': 200,
@@ -312,8 +375,11 @@ def get_analysis_detail(filename):
         for stock in selected_stocks:
             score_detail = stock.get('strength_score_detail', {})
             breakdown = score_detail.get('breakdown', {})
+            raw_score = stock.get('strength_score', 0)
 
-            stocks_data.append({
+            grade_info = five_tier_grade(raw_score)
+
+            entry = {
                 'rank': stock.get('rank', 0),
                 'code': stock.get('code', ''),
                 'name': stock.get('name', ''),
@@ -322,9 +388,11 @@ def get_analysis_detail(filename):
                 'peRatio': round(stock.get('pe_ratio', 0), 2),
                 'pbRatio': round(stock.get('pb_ratio', 0), 2),
                 'roe': round(stock.get('roe', 0), 2),
-                'momentum20d': round(stock.get('momentum_20d', 0), 2),
-                'strengthScore': round(stock.get('strength_score', 0), 1),
-                'grade': score_detail.get('grade', ''),
+                'momentum20d': round(stock.get('momentum_20d', 0), 4),
+                'strengthScore': round(raw_score, 1),
+                'grade': grade_info['grade'],
+                'gradeLabel': grade_info['label'],
+                'gradeConfidence': grade_info['confidence'],
                 'scoreBreakdown': {
                     'technical': breakdown.get('technical', 0),
                     'valuation': breakdown.get('valuation', 0),
@@ -334,7 +402,10 @@ def get_analysis_detail(filename):
                 },
                 'selectionReason': stock.get('selection_reason', ''),
                 'industry': stock.get('industry', '未知')
-            })
+            }
+
+            entry = apply_momentum_gate(entry)
+            stocks_data.append(entry)
 
         return jsonify({
             'code': 200,
