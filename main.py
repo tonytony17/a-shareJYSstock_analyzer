@@ -96,6 +96,30 @@ def main():
                 print(f"\n分析完成！推荐 {len(selected_stocks)} 只股票:")
                 print("-" * 50)
 
+                # ── 行业集中度检测 ──────────────────────────────────────────
+                # 当同一行业占据前10名超过3席时，提示可能存在行业估值偏差
+                # （金融股PE天然低，会系统性占便宜，需关注）
+                from collections import Counter
+                industry_counter = Counter(
+                    s.get('industry', '未知') for s in selected_stocks
+                )
+                dominant = [(ind, cnt) for ind, cnt in industry_counter.items() if cnt >= 3]
+                if dominant:
+                    print("\n⚠️  行业集中度提示（同行业≥3席，估值因子可能存在行业偏差）:")
+                    for ind, cnt in dominant:
+                        print(f"   • {ind}: {cnt} 只 — 建议与行业内均值比较，而非全市场绝对比较")
+
+                # ── 动量门控提示 ─────────────────────────────────────────────
+                neg_mom_stocks = [
+                    s for s in selected_stocks
+                    if s.get('momentum_20d', 0) < 0
+                ]
+                if neg_mom_stocks:
+                    print(f"\n⚡ 动量门控提示（{len(neg_mom_stocks)} 只负动量股票，API层已施加惩罚系数）:")
+                    for s in neg_mom_stocks:
+                        print(f"   • {s.get('name','')} ({s.get('code','')}): "
+                              f"20日动量 {s.get('momentum_20d',0)*100:+.1f}% — 技术面分已×0.6")
+
                 for stock in selected_stocks:
                     print(f"#{stock.get('rank', 0)} {stock.get('name', '')} ({stock.get('code', '')})")
                     print(f"   价格: {stock.get('price', 0):.2f}元")
@@ -103,7 +127,7 @@ def main():
                     print(f"   PE: {stock.get('pe_ratio', 0):.2f}")
                     print(f"   20日动量: {stock.get('momentum_20d', 0):.2f}%")
                     print(f"   强势分数: {stock.get('strength_score', 0):.1f}")
-                    
+
                     # 显示分项得分
                     score_detail = stock.get('strength_score_detail', {})
                     if score_detail:
@@ -115,11 +139,20 @@ def main():
                         print(f"     - 安全性: {breakdown.get('safety', 0)}分")
                         print(f"     - 股息: {breakdown.get('dividend', 0)}分")
                         print(f"   评级: {score_detail.get('grade', '')}")
-                    
+
                     print(f"   理由: {stock.get('selection_reason', '')}")
                     print()
 
-                print("详细结果已保存到 ./logs/ 目录")
+                # ── 保存分析结果（含因子原始数据，供后续回测闭环使用）──────
+                import json
+                logs_dir = os.path.join(os.path.dirname(__file__), 'logs', 'analysis')
+                os.makedirs(logs_dir, exist_ok=True)
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                save_path = os.path.join(logs_dir, f"{timestamp}.json")
+                with open(save_path, 'w', encoding='utf-8') as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2, default=str)
+
+                print(f"详细结果已保存到 {save_path}")
             else:
                 print("分析失败，请检查日志")
 
