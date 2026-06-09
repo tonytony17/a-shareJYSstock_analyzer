@@ -48,6 +48,8 @@ class OptimizedBacktest:
         self.cache_dir = './cache'
         os.makedirs(self.cache_dir, exist_ok=True)
         self.stock_name_cache = {}
+        # 因子贡献度记录：每次回测后累积，用于分析哪些因子真正有效
+        self._factor_records = []  # [{factor_scores, return_pct, momentum_positive, date}]
 
     def get_cache_file(self, cache_key):
         return os.path.join(self.cache_dir, f"{cache_key}.pkl")
@@ -281,17 +283,43 @@ class OptimizedBacktest:
                 buy_price = stock['price']
                 sell_price = sell_data['price']
                 return_pct = (sell_price / buy_price - 1) * 100
-                performance.append({
+                momentum = stock.get('momentum_20d', 0)
+
+                # ── 动量门控：20日动量为负时标记，供后续因子分析使用 ──
+                momentum_positive = momentum >= 0
+
+                perf_entry = {
                     'code': stock['code'],
                     'name': stock['name'],
                     'buy_price': buy_price,
                     'sell_price': sell_price,
                     'return_pct': return_pct,
                     'pe_ratio': stock.get('pe_ratio', 0),
-                    'strength_score': stock.get('strength_score', 0)
+                    'strength_score': stock.get('strength_score', 0),
+                    'momentum_20d': momentum,
+                    'momentum_positive': momentum_positive,
+                }
+                # 附加分项得分（如果 strength_score_detail 存在）
+                score_detail = stock.get('strength_score_detail', {})
+                breakdown = score_detail.get('breakdown', {})
+                perf_entry['score_technical'] = breakdown.get('technical', 0)
+                perf_entry['score_valuation'] = breakdown.get('valuation', 0)
+                perf_entry['score_profitability'] = breakdown.get('profitability', 0)
+                perf_entry['score_safety'] = breakdown.get('safety', 0)
+                perf_entry['score_dividend'] = breakdown.get('dividend', 0)
+
+                performance.append(perf_entry)
+
+                # 累积因子记录供 print_factor_attribution 使用
+                self._factor_records.append({
+                    'date': analysis_date,
+                    **perf_entry
                 })
+
                 emoji = "📈" if return_pct > 0 else "📉" if return_pct < 0 else "➖"
-                logger.info(f"   {emoji} {stock['name']}: ¥{buy_price:.2f} → ¥{sell_price:.2f} ({return_pct:+.2f}%)")
+                momentum_flag = "" if momentum_positive else " ⚠️负动量"
+                logger.info(f"   {emoji} {stock['name']}: ¥{buy_price:.2f} → ¥{sell_price:.2f} "
+                            f"({return_pct:+.2f}%){momentum_flag}")
 
         if performance:
             returns = [p['return_pct'] for p in performance]
@@ -304,6 +332,17 @@ class OptimizedBacktest:
             logger.info(f"   • 平均收益: {avg_return:+.2f}%")
             logger.info(f"   • 收益区间: {min_return:+.2f}% ~ {max_return:+.2f}%")
             logger.info(f"   • 胜率: {win_rate:.1f}% ({win_count}/{len(returns)})")
+
+            # ── 动量门控对比：负动量股票 vs 正动量股票表现 ──
+            pos_mom = [p['return_pct'] for p in performance if p.get('momentum_positive', True)]
+            neg_mom = [p['return_pct'] for p in performance if not p.get('momentum_positive', True)]
+            if neg_mom:
+                neg_avg = sum(neg_mom) / len(neg_mom)
+                pos_avg = sum(pos_mom) / len(pos_mom) if pos_mom else 0
+                logger.info(f"\n⚡ 动量门控分析 (本次):")
+                logger.info(f"   • 正动量({len(pos_mom)}只) 平均: {pos_avg:+.2f}%")
+                logger.info(f"   • 负动量({len(neg_mom)}只) 平均: {neg_avg:+.2f}%")
+                logger.info(f"   • 门控收益提升估算: {pos_avg - neg_avg:+.2f}%")
 
         return {
             'analysis_date': analysis_date,
@@ -320,6 +359,62 @@ class OptimizedBacktest:
                 'total_count': len(performance)
             }
         }
+
+    def print_factor_attribution(self):
+        """
+        因子贡献度报告：分析哪些分项得分与实际收益相关。
+        在多日回测结束后调用，输出各因子的预测有效性。
+        """
+        if not self._factor_records:
+            logger.warning("无因子记录，请先运行回测")
+            return
+
+        records = self._factor_records
+        logger.info(f"\n{'='*70}")
+        logger.info(f"📐 因子贡献度分析 (共 {len(records)} 条持仓记录)")
+        logger.info(f"{'='*70}")
+
+        factor_keys = [
+            ('score_technical',     '技术面'),
+            ('score_valuation',     '估值'),
+            ('score_profitability', '盈利能力'),
+            ('score_safety',        '安全性'),
+            ('score_dividend',      '股息'),
+            ('strength_score',      '综合评分'),
+            ('momentum_20d',        '20日动量'),
+        ]
+
+        for key, label in factor_keys:
+            vals = [(r[key], r['return_pct']) for r in records if key in r and r[key] is not None]
+            if len(vals) < 4:
+                continue
+            xs = [v[0] for v in vals]
+            ys = [v[1] for v in vals]
+            # Pearson 相关系数（手算，避免 numpy 依赖）
+            n = len(xs)
+            mx, my = sum(xs)/n, sum(ys)/n
+            num = sum((x - mx)*(y - my) for x, y in zip(xs, ys))
+            den = (sum((x - mx)**2 for x in xs) * sum((y - my)**2 for y in ys)) ** 0.5
+            corr = num / den if den > 0 else 0
+            # 高分组 vs 低分组收益对比
+            median_x = sorted(xs)[n // 2]
+            high = [y for x, y in vals if x >= median_x]
+            low  = [y for x, y in vals if x <  median_x]
+            high_avg = sum(high)/len(high) if high else 0
+            low_avg  = sum(low)/len(low)   if low  else 0
+            effectiveness = "✅强" if abs(corr) > 0.25 else ("🟡中" if abs(corr) > 0.1 else "❌弱")
+            logger.info(f"   {label:10s}: 相关r={corr:+.3f} {effectiveness} | "
+                        f"高分组{high_avg:+.2f}% vs 低分组{low_avg:+.2f}%")
+
+        # 动量门控整体统计
+        pos = [r['return_pct'] for r in records if r.get('momentum_positive', True)]
+        neg = [r['return_pct'] for r in records if not r.get('momentum_positive', True)]
+        if neg:
+            logger.info(f"\n⚡ 动量门控整体影响 ({len(records)} 笔):")
+            logger.info(f"   正动量({len(pos)}只): {sum(pos)/len(pos):+.2f}%  "
+                        f"负动量({len(neg)}只): {sum(neg)/len(neg):+.2f}%")
+            logger.info(f"   → 过滤负动量股票，理论可提升均收益约 "
+                        f"{sum(pos)/len(pos) - sum(neg)/len(neg):+.2f}%")
 
     def backtest_multi_days(self, start_date: str, end_date: str, hold_days: int = 1):
         logger.info(f"\n{'='*70}")
@@ -358,6 +453,9 @@ class OptimizedBacktest:
                 logger.info(f"   • 最佳单笔: {max(all_returns):+.2f}%")
                 logger.info(f"   • 最差单笔: {min(all_returns):+.2f}%")
                 logger.info(f"   • 整体胜率: {win_count/len(all_returns)*100:.1f}%")
+
+            # 多日回测结束后输出因子贡献度报告
+            self.print_factor_attribution()
 
         return all_results
 
